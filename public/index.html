@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Secret Message Transmitter</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { background-color: #f8f9fa; }
+    .container { max-width: 800px; margin-top: 2rem; }
+    textarea { resize: none; }
+    .status { font-size: 0.9rem; color: #6c757d; margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1 class="text-center mb-4">Secret Message Transmitter</h1>
+
+    <div class="card mb-4">
+      <div class="card-body">
+        <h5 class="card-title">Send Message</h5>
+        <textarea id="txData" class="form-control mb-3" rows="3" placeholder="Type your secret message here...">Hello World</textarea>
+        <select id="protocolSelect" class="form-select mb-3">
+          <option value="GGWAVE_PROTOCOL_AUDIBLE_FAST">Audible Fast</option>
+          <option value="GGWAVE_PROTOCOL_AUDIBLE_FASTEST">Audible Fastest</option>
+          <option value="GGWAVE_PROTOCOL_ULTRASOUND_FAST">Ultrasound Fast</option>
+          <option value="GGWAVE_PROTOCOL_ULTRASOUND_FASTEST">Ultrasound Fastest</option>
+          <option value="GGWAVE_PROTOCOL_DT_FAST">DT Fast</option>
+          <option value="GGWAVE_PROTOCOL_DT_FASTEST">DT Fastest</option>
+        </select>
+        <div class="mb-3">
+          <label for="volumeControl" class="form-label">
+            Volume (May reduce audio quality and cause loss in performance):
+          </label>
+          <input id="volumeControl" type="range" class="form-range" min="1" max="10" step="0.1" value="1">
+        </div>
+        <div class="d-grid gap-2">
+          <button onclick="onSend()" class="btn btn-primary">Send via Sound</button>
+        </div>
+        <div id="sendStatus" class="status"></div>
+        <div class="progress mt-2" id="sendProgress" style="display: none;">
+          <div class="progress-bar" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+        </div>
+        <div id="chunkStatus" class="status"></div>
+      </div>
+    </div>
+
+    <div class="card mb-4">
+      <div class="card-body">
+        <h5 class="card-title">Receive Message</h5>
+        <textarea id="rxData" class="form-control mb-3" rows="3" placeholder="Received messages will appear here..." disabled></textarea>
+        <div class="d-grid gap-2">
+          <button id="captureStart" class="btn btn-success">Start Listening</button>
+          <button id="captureStop" class="btn btn-danger" hidden>Stop Listening</button>
+        </div>
+        <div id="receiveStatus" class="status"></div>
+      </div>
+    </div>
+  </div>
+
+  <script type="text/javascript" src="ggwave.js"></script>
+  <script type="text/javascript">
+    // Audio and GGWave setup
+    window.AudioContext = window.AudioContext || window.webkitAudioContext;
+    window.OfflineAudioContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+
+    var context = null, recorder = null, ggwave = null, parameters = null, instance = null, mediaStream = null;
+    var txData = document.getElementById("txData");
+    var rxData = document.getElementById("rxData");
+    var captureStart = document.getElementById("captureStart");
+    var captureStop = document.getElementById("captureStop");
+    var sendStatus = document.getElementById("sendStatus");
+    var receiveStatus = document.getElementById("receiveStatus");
+    var protocolSelect = document.getElementById("protocolSelect");
+    var volumeControl = document.getElementById("volumeControl");
+    var sendProgress = document.getElementById("sendProgress");
+    var chunkStatus = document.getElementById("chunkStatus");
+
+    var volumeMultiplier = parseFloat(volumeControl.value);
+    volumeControl.addEventListener("input", function() {
+      volumeMultiplier = parseFloat(volumeControl.value);
+    });
+
+    // Load GGWave
+    ggwave_factory().then(function(obj) { ggwave = obj; });
+
+    function convertTypedArray(src, type) {
+      var buffer = new ArrayBuffer(src.byteLength);
+      new src.constructor(buffer).set(src);
+      return new type(buffer);
+    }
+
+    function init() {
+      if (!context) {
+        context = new AudioContext({sampleRate: 48000});
+        parameters = ggwave.getDefaultParameters();
+        parameters.sampleRateInp = context.sampleRate;
+        parameters.sampleRateOut = context.sampleRate;
+        instance = ggwave.init(parameters);
+      }
+    }
+
+    // Add a global variable to track confirmation state
+    let confirmationReceived = false;
+    let confirmationTimeout = null;
+
+    // Modify the sender's logic to listen for confirmation
+    function onSend() {
+      init();
+      captureStop.click();
+      const message = txData.value;
+      const encoder = new TextEncoder();
+      const data = encoder.encode(message);
+      const maxSize = 5 * 1024; // 5 KB limit
+      if (data.length > maxSize) {
+        sendStatus.textContent = "Error: Message exceeds 5 KB limit";
+        setTimeout(() => sendStatus.textContent = "", 3000);
+        return;
+      }
+      let chunks = [];
+      let totalChunks = 1;
+      if (data.length > 106) {
+        const chunkSize = 96; // Adjust chunk size if needed
+        totalChunks = Math.ceil(data.length / chunkSize);
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * chunkSize;
+          const end = start + chunkSize;
+          const chunkBytes = data.slice(start, end);
+          const base64 = btoa(String.fromCharCode(...chunkBytes));
+          console.log(`Chunk ${i + 1}/${totalChunks}:`, base64); // Log chunk details
+          chunks.push(`CHUNK:${i + 1}/${totalChunks}|${base64}`);
+        }
+      } else {
+        const base64 = btoa(String.fromCharCode(...data));
+        chunks.push(`CHUNK:1/1|${base64}`);
+      }
+      let currentChunk = 0;
+      const sendNextChunk = () => {
+        if (currentChunk >= chunks.length) {
+          sendStatus.textContent = "All chunks sent!";
+          chunkStatus.textContent = "";
+          setTimeout(() => sendStatus.textContent = "", 3000);
+          sendProgress.style.display = "none";
+          confirmationReceived = false;
+          captureStart.click();
+          confirmationTimeout = setTimeout(() => {
+            if (!confirmationReceived) {
+              sendStatus.textContent = "Too far, go closer to send.";
+            }
+          }, 5000); // 5-second timeout
+          return;
+        }
+        const protocol = ggwave.ProtocolId[protocolSelect.value];
+        const waveform = ggwave.encode(instance, chunks[currentChunk], protocol, 10);
+        const buf = convertTypedArray(waveform, Float32Array);
+        for (let j = 0; j < buf.length; j++) buf[j] *= volumeMultiplier;
+        const buffer = context.createBuffer(1, buf.length, context.sampleRate);
+        buffer.getChannelData(0).set(buf);
+        const source = context.createBufferSource();
+        source.buffer = buffer;
+        source.connect(context.destination);
+        source.onended = () => {
+          currentChunk++;
+          sendNextChunk();
+        };
+        source.start(0);
+        const progress = ((currentChunk + 1) / totalChunks) * 100;
+        sendProgress.querySelector(".progress-bar").style.width = progress + "%";
+        sendProgress.querySelector(".progress-bar").ariaValueNow = progress;
+        chunkStatus.textContent = `${currentChunk + 1}/${totalChunks} chunks sent`;
+      };
+      sendProgress.style.display = "block";
+      sendNextChunk();
+    }
+
+    // Modify the receiver's logic to send confirmation
+    captureStart.addEventListener("click", function () {
+      init();
+      let constraints = {
+        audio: { echoCancellation: false, autoGainControl: false, noiseSuppression: false }
+      };
+      navigator.mediaDevices.getUserMedia(constraints).then(function (e) {
+        mediaStream = context.createMediaStreamSource(e);
+        var bufferSize = 1024;
+        var numberOfInputChannels = 1;
+        var numberOfOutputChannels = 1;
+        recorder = context.createScriptProcessor ? context.createScriptProcessor(bufferSize, numberOfInputChannels, numberOfOutputChannels)
+          : context.createJavaScriptNode(bufferSize, numberOfInputChannels, numberOfOutputChannels);
+        recorder.onaudioprocess = function (e) {
+          const input = e.inputBuffer.getChannelData(0);
+          const res = ggwave.decode(instance, convertTypedArray(new Float32Array(input), Int8Array));
+          if (!res || res.length === 0) return;
+          const text = new TextDecoder().decode(res);
+          console.log("Received:", text); // Log received data
+          if (text.startsWith("CHUNK:")) {
+            const match = text.match(/^CHUNK:(\d+)\/(\d+)\|(.*)$/);
+            if (match) {
+              const [_, current, total, data] = match;
+              console.log(`Received chunk ${current}/${total}:`, data); // Log chunk details
+              if (!window.receivedChunks || window.receivedChunks.total !== parseInt(total)) {
+                window.receivedChunks = { total: parseInt(total), chunks: Array(parseInt(total)).fill(null), count: 0 };
+              }
+              const idx = parseInt(current) - 1;
+              if (!window.receivedChunks.chunks[idx]) {
+                window.receivedChunks.chunks[idx] = data;
+                window.receivedChunks.count++;
+              }
+              if (window.receivedChunks.count === window.receivedChunks.total) {
+                const fullBase64 = window.receivedChunks.chunks.join('');
+                try {
+                  const bytes = Uint8Array.from(atob(fullBase64), c => c.charCodeAt(0));
+                  rxData.value = new TextDecoder().decode(bytes);
+                  receiveStatus.textContent = "Message received!";
+                  // Send confirmation message
+                  const confirmationMessage = "1xyz0recv4";
+                  const protocol = ggwave.ProtocolId[protocolSelect.value];
+                  const waveform = ggwave.encode(instance, confirmationMessage, protocol, 10);
+                  const buf = convertTypedArray(waveform, Float32Array);
+                  for (let j = 0; j < buf.length; j++) buf[j] *= volumeMultiplier;
+                  const buffer = context.createBuffer(1, buf.length, context.sampleRate);
+                  buffer.getChannelData(0).set(buf);
+                  const source = context.createBufferSource();
+                  source.buffer = buffer;
+                  source.connect(context.destination);
+                  source.start(0);
+                } catch (e) {
+                  console.error("Decoding error:", e); // Log decoding errors
+                  receiveStatus.textContent = "Decoding error";
+                }
+                setTimeout(() => receiveStatus.textContent = "", 3000);
+                window.receivedChunks = null;
+              }
+            }
+          } else if (text === "1xyz0recv4") {
+            confirmationReceived = true;
+            sendStatus.textContent = "Message received by recipient.";
+            clearTimeout(confirmationTimeout);
+          } else {
+            rxData.value = text;
+            receiveStatus.textContent = "Message received!";
+            setTimeout(() => receiveStatus.textContent = "", 3000);
+          }
+        };
+        mediaStream.connect(recorder);
+        recorder.connect(context.destination);
+      }).catch(function (e) {
+        console.error(e);
+        receiveStatus.textContent = "Error: Microphone access denied.";
+      });
+      rxData.value = '';
+      captureStart.hidden = true;
+      captureStop.hidden = false;
+      receiveStatus.textContent = "Listening...";
+    });
+
+    captureStop.addEventListener("click", function () {
+      if (recorder) {
+        recorder.disconnect(context.destination);
+        mediaStream.disconnect(recorder);
+        recorder = null;
+      }
+      rxData.value = 'Audio capture paused. Click "Start Listening" to resume.';
+      captureStart.hidden = false;
+      captureStop.hidden = true;
+      receiveStatus.textContent = "Listening stopped.";
+    });
+
+    captureStop.click();
+  </script>
+</body>
+</html>
