@@ -10,6 +10,15 @@
     .container { max-width: 800px; margin-top: 2rem; }
     textarea { resize: none; }
     .status { font-size: 0.9rem; color: #6c757d; margin-top: 0.5rem; }
+    #canvas {
+      position: fixed;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none; /* Ensure the canvas doesn't block clicks */
+      z-index: -1; /* Place it behind other elements */
+    }
   </style>
 </head>
 <body>
@@ -58,6 +67,9 @@
     </div>
   </div>
 
+  <!-- Canvas for audio visualization -->
+  <canvas id="canvas"></canvas>
+
   <script type="text/javascript" src="ggwave.js"></script>
   <script type="text/javascript">
     // Audio and GGWave setup
@@ -75,6 +87,12 @@
     var volumeControl = document.getElementById("volumeControl");
     var sendProgress = document.getElementById("sendProgress");
     var chunkStatus = document.getElementById("chunkStatus");
+
+    // Visualization setup
+    var canvas = document.getElementById("canvas");
+    var ctx = canvas.getContext("2d");
+    var analyser = null;
+    var dataArray = null;
 
     var volumeMultiplier = parseFloat(volumeControl.value);
     volumeControl.addEventListener("input", function() {
@@ -97,8 +115,47 @@
         parameters.sampleRateInp = context.sampleRate;
         parameters.sampleRateOut = context.sampleRate;
         instance = ggwave.init(parameters);
+
+        // Initialize analyser for visualization
+        analyser = context.createAnalyser();
+        analyser.fftSize = 256;
+        dataArray = new Uint8Array(analyser.frequencyBinCount);
       }
     }
+
+    // Visualization rendering function
+    function renderFrame() {
+      requestAnimationFrame(renderFrame);
+
+      if (!analyser || !dataArray) return;
+
+      analyser.getByteFrequencyData(dataArray);
+
+      // Clear canvas
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Draw bars
+      var barWidth = (canvas.width / dataArray.length) * 2.5;
+      var barHeight;
+      var x = 0;
+
+      for (var i = 0; i < dataArray.length; i++) {
+        barHeight = dataArray[i];
+
+        var r = barHeight + (25 * (i / dataArray.length));
+        var g = 250 * (i / dataArray.length);
+        var b = 50;
+
+        ctx.fillStyle = "rgb(" + r + "," + g + "," + b + ")";
+        ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+
+        x += barWidth + 1;
+      }
+    }
+
+    // Start rendering the visualization
+    renderFrame();
 
     // Add a global variable to track confirmation state
     let confirmationReceived = false;
@@ -159,6 +216,7 @@
         const source = context.createBufferSource();
         source.buffer = buffer;
         source.connect(context.destination);
+        source.connect(analyser); // Connect to analyser for visualization
         source.onended = () => {
           currentChunk++;
           sendNextChunk();
@@ -222,6 +280,7 @@
                   const source = context.createBufferSource();
                   source.buffer = buffer;
                   source.connect(context.destination);
+                  source.connect(analyser); // Connect to analyser for visualization
                   source.start(0);
                 } catch (e) {
                   console.error("Decoding error:", e); // Log decoding errors
@@ -243,6 +302,7 @@
         };
         mediaStream.connect(recorder);
         recorder.connect(context.destination);
+        recorder.connect(analyser); // Connect to analyser for visualization
       }).catch(function (e) {
         console.error(e);
         receiveStatus.textContent = "Error: Microphone access denied.";
@@ -256,6 +316,7 @@
     captureStop.addEventListener("click", function () {
       if (recorder) {
         recorder.disconnect(context.destination);
+        recorder.disconnect(analyser); // Disconnect from analyser
         mediaStream.disconnect(recorder);
         recorder = null;
       }
